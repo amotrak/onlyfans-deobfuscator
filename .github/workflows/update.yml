@@ -1,0 +1,139 @@
+name: Generate dynamic rules
+
+on:
+  schedule:
+    - cron: "17 */6 * * *" # run every 6 hours at 17 minutes past hour
+permissions:
+  contents: write
+env:
+  OLD_SCRIPT_ID: ${{ vars.OLD_SCRIPT_ID }}
+  SCRIPTS_DIR: "./scripts"
+
+jobs:
+  process-script:
+    runs-on: ubuntu-latest
+    outputs:
+      is_new_script: ${{ steps.compare-script-ids.outputs.is_new_script }}
+      new_script_id: ${{ steps.compare-script-ids.outputs.new_script_id }}
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - name: Cache curl-impersonate
+      id: cache-curl-impersonate
+      uses: actions/cache@v4
+      with:
+        path: ./curl-impersonate
+        key: ${{ runner.os }}-curl-impersonate
+    
+    # cloudflare restricts access via tls fingerprinting when doing requests with old openssl version
+    - name: Download curl-impersonate
+      if: steps.cache-curl-impersonate.outputs.cache-hit != 'true'
+      run: |
+        mkdir -p curl-impersonate
+        wget https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz
+        tar -xf curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz -C ./curl-impersonate
+
+    - name: Run bash script to download obfuscated script
+      run: |
+        WEBPAGE_URL="https://onlyfans.com"
+        OUTPUT_DIR="$SCRIPTS_DIR/obfuscated"
+        mkdir -p "$OUTPUT_DIR"
+
+        WEBPAGE_SOURCE=$(./curl-impersonate/curl-impersonate-chrome --silent --show-error -H "User-Agent: Mozilla/5.0" "$WEBPAGE_URL")
+
+        JS_URL=$(echo "$WEBPAGE_SOURCE" | grep -oP 'https:\/\/static2\.onlyfans\.com\/static\/prod\/[a-f0-9]\/202[567]\d{8}-[a-f0-9]{10}\/[a-f0-9]{4}\.js')
+        if [ -z "$JS_URL" ]; then
+            echo "$WEBPAGE_SOURCE"
+            echo "No matching JavaScript file found in the webpage source."
+            exit 1
+        fi
+
+        TIMESTAMP=$(echo "$JS_URL" | grep -oP '202[567]\d{8}-[a-f0-9]{10}')
+        if [ -z "$TIMESTAMP" ]; then
+            echo "Failed to extract timestamp from the JavaScript URL."
+            exit 1
+        fi
+
+        OUTPUT_FILE="$OUTPUT_DIR/$TIMESTAMP.js"
+
+        ./curl-impersonate/curl-impersonate-chrome --silent --show-error -H "User-Agent: Mozilla/5.0" -o "$OUTPUT_FILE" "$JS_URL"
+        if [ $? -ne 0 ]; then
+            echo "Failed to download JavaScript file from $JS_URL."
+            exit 1
+        fi
+
+        script_path="$OUTPUT_FILE"
+        script_id=$(basename $script_path | tr -d ".js")
+        echo "NEW_SCRIPT_ID=$script_id" >> $GITHUB_ENV
+
+    - name: Compare old and new script
+      id: compare-script-ids
+      run: |
+        if [ "$NEW_SCRIPT_ID" == "$OLD_SCRIPT_ID" ]; then
+          echo "is_new_script=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "is_new_script=true" >> "$GITHUB_OUTPUT"
+          echo "new_script_id=$NEW_SCRIPT_ID" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload obfuscated script
+      if: steps.compare-script-ids.outputs.is_new_script == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.compare-script-ids.outputs.new_script_id }}
+        path: ${{ env.SCRIPTS_DIR }}/obfuscated/${{ steps.compare-script-ids.outputs.new_script_id }}.js
+
+    - name: Set up Node.js
+      if: steps.compare-script-ids.outputs.is_new_script == 'true'
+      uses: actions/setup-node@v3
+      with:
+        node-version: "23"
+        cache: "npm"
+
+    - name: Install dependencies
+      if: steps.compare-script-ids.outputs.is_new_script == 'true'
+      run: npm ci
+
+    - name: Build
+      if: steps.compare-script-ids.outputs.is_new_script == 'true'
+      run: npm run build
+
+    - name: Deobfuscate
+      if: steps.compare-script-ids.outputs.is_new_script == 'true'
+      run: |
+        mkdir -p "$SCRIPTS_DIR/deobfuscated"
+        npm run deobfuscate -- $SCRIPTS_DIR/obfuscated/$NEW_SCRIPT_ID.js $SCRIPTS_DIR/deobfuscated/$NEW_SCRIPT_ID.js
+        if [ $? -ne 0 ]; then
+            echo "Failed to deobfuscate"
+            exit 1
+        fi
+
+    - name: Generate dynamic rules
+      if: steps.compare-script-ids.outputs.is_new_script == 'true'
+      run: |
+        rules=$(npm run --silent dynamic-rules -- $SCRIPTS_DIR/deobfuscated/$NEW_SCRIPT_ID.js)
+        if [ $? -ne 0 ]; then
+            echo "Failed to generate dynamic rules"
+            exit 1
+        fi
+        echo $rules > ./dynamic-rules.json
+
+    - name: Commit and push changes
+      if: steps.compare-script-ids.outputs.is_new_script == 'true'
+      run: |
+        git config --local user.name "GitHub Actions"
+        git config --local user.email "actions@github.com"
+        git add ./dynamic-rules.json
+        git commit -m "dynamic-rules.json: $NEW_SCRIPT_ID"
+        git push
+
+    - name: Update last script id
+      if: steps.compare-script-ids.outputs.is_new_script == 'true'
+      run: |
+        gh variable list
+        gh variable set OLD_SCRIPT_ID --body "$NEW_SCRIPT_ID"
+        gh variable list
+      env:
+        GITHUB_TOKEN: ${{ secrets.VARS_TOKEN }}

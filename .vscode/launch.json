@@ -1,0 +1,12 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node-terminal",
+            "name": "deobfuscate.js",
+            "request": "launch",
+            "command": "npm run deobfuscate ./samples/obfuscated/10.js ./samples/deobfuscated/10.js",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
