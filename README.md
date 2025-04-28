@@ -9,7 +9,7 @@ _<center>The result of a deobfuscation</center>_
 OnlyFans uses API protection, so the requests can't be simply replayed and modified with automation tools and curl. In all important requests (such as login, getting profile info), the `sign` header is used, which is a SHA-1 hashed string that is verified on the server side and is a combination of path/body/user_id and timestamp with the salt and some additional transformations (which are obfuscated), so the HTTP request is a valid only for a few minutes; the backend then refuses to accept it.
 
 ## Getting Started
-Use [dynamic-rules.json](https://github.com/amotrak/test-repo/raw/refs/heads/main/dynamic-rules.json) which is automatically updated every 6 hours.
+Use [dynamic-rules.json](https://github.com/amotrak/onlyfans-deobfuscator/raw/refs/heads/main/dynamic-rules.json) which is automatically updated every 6 hours.
 
 You can however clone the repo and use this tool locally with the next steps:
 
