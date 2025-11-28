@@ -41,7 +41,7 @@ jobs:
         OUTPUT_DIR="$SCRIPTS_DIR/obfuscated"
         mkdir -p "$OUTPUT_DIR"
 
-        WEBPAGE_SOURCE=$(./curl-impersonate/curl-impersonate-chrome --silent --show-error -H "User-Agent: Mozilla/5.0" "$WEBPAGE_URL")
+        WEBPAGE_SOURCE=$(./curl-impersonate/curl_chrome116 --silent --show-error "$WEBPAGE_URL")
 
         JS_URL=$(echo "$WEBPAGE_SOURCE" | grep -oP 'https:\/\/static2\.onlyfans\.com\/static\/prod\/[a-f0-9]\/202[567]\d{8}-[a-f0-9]{10}\/[a-f0-9]{4}\.js')
         if [ -z "$JS_URL" ]; then
