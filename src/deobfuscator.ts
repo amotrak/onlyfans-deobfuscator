@@ -62,13 +62,17 @@ class ObfuscatedStrings {
         const funcExpr = node.body.body;
         if (node.params.length !== 2) return;
         
-        if (funcExpr.length !== 2 || !t.isVariableDeclaration(funcExpr[0])) return;
+        if (!funcExpr.some((stmt, _i, _array) => {
+            if (stmt.type !== "VariableDeclaration") return false
+            let declarations = (stmt as t.VariableDeclaration).declarations;
+            if (declarations.length !== 1) return false;
 
-        let declarations = (funcExpr[0] as t.VariableDeclaration).declarations;
-        if (declarations.length !== 1) return;
-
-        if (!t.isCallExpression(declarations[0].init)) return;
-        if (!t.isIdentifier(declarations[0].init?.callee, {name: obfStringsFunc})) return;
+            if (!t.isCallExpression(declarations[0].init)) return false;
+            if (!t.isIdentifier(declarations[0].init?.callee, {name: obfStringsFunc})) return false;
+            return true
+        })) {
+            return;
+        }
 
         if (!node.id) {
             console.error("Decode string function was found but its name undefined");
