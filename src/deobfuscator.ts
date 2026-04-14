@@ -170,7 +170,6 @@ class DecryptStrings {
 
             const code = generate(refParentPath.node).code;
             const value = vm.runInContext(code, vmContext);
-            // console.log(`${code} -> ${value}`)
             refParentPath.replaceWith(t.valueToNode(value));
         }
     }
@@ -219,82 +218,76 @@ class MapReplacer {
         let node = path.node;
         if (!t.isObjectExpression(node.init)) return;
         if (!t.isIdentifier(node.id)) return;
+        if (node.init.properties.length === 0) return;
 
-        let flag = false;
+        let hasValidEntry = false;
         node.init.properties = node.init.properties.filter((elemNode) => {
             if (!t.isObjectProperty(elemNode)) return true;
             if (!t.isIdentifier(elemNode.key)) return true;
             const key = elemNode.key.name;
-
-            // either one of
-            // function(lhs, rhs) { lhs %-+ rhs }
-            // function(inner, arg1, arg2, arg3) { inner(arg1, arg2, arg3) }
-            // function(inner, arg1) { inner(arg1) }
-            if (t.isFunctionExpression(elemNode.value)) {
-                let funcBody = elemNode.value.body.body;
-                if (funcBody.length !== 1) return true; // only one statement in function
-                if (!t.isReturnStatement(funcBody[0])) return true; // only return expression
-                const ret = funcBody[0].argument;
-
-                if (t.isBinaryExpression(ret)) {
-                    this.decryptionMap[key] = ret.operator;
-                    flag = true; // should save map variable name and its scope
-                } else if (t.isCallExpression(ret)) {
-                    if (ret.arguments.length === 3) {
-                        this.decryptionMap[key] = MapFuncType.CallThreeArg;
-                    } else if (ret.arguments.length === 1) {
-                        this.decryptionMap[key] = MapFuncType.CallOneArg;
-                    }
+            const value = elemNode.value;
+            return this.saveEntry(key, value, (shouldSave: boolean) => {
+                if (shouldSave) {
+                    hasValidEntry = true;
                 }
-            } else if (t.isStringLiteral(elemNode.value)) {
-                // tyrSs: "navigator.userAgent"
-                // save static strings for futher replacements in code
-                this.decryptionMap[key] = elemNode.value.value;
-            } else {
-                console.error(`Unknown value type occured in operations map: ${elemNode.value.type}`)
-                return true;
-            }
-            return false;
+            });
         });
         
-        if (flag) {
+        if (hasValidEntry) {
             this.mapName = node.id.name;
             this.scope = path.scope;
-            return flag;
+            return hasValidEntry;
         }
     }
 
-    /**
-     * return Math.abs(c.YwyJj(c.yWlpb(...)))
-     */
-    public replaceBinaryOpCalls() {
-        this.scope?.traverse(this.scope.path.node, {
-            CallExpression(path: NodePath<t.CallExpression>) {
-                const node = path.node;
-                if (!t.isMemberExpression(node.callee)) return;
-
-                const {object, property} = node.callee;
-                if (!t.isIdentifier(object, {name: this.mapName})) return; // only if accessing functions in that map
-                if (!t.isStringLiteral(property)) return;
-
-                if (path.node.arguments.length !== 2) return; // only two arguments
-                // replace function call with respected binary operation
-                const op = this.decryptionMap[property.value];
-                if (!isBinaryOperator(op)) return;
-                let unObfNode = t.binaryExpression(op, node.arguments[0] as t.Expression, node.arguments[1] as t.Expression);
-                path.replaceWith(unObfNode);
-            }
-        }, this);
+    public saveEntry(key: string, value: t.Expression | t.PatternLike, on_function_expression: (shouldSave: boolean) => void): boolean | undefined {
+        // either one of
+        // function(lhs, rhs) { lhs %-+ rhs }
+        // function(inner, arg1, arg2, arg3) { inner(arg1, arg2, arg3) }
+        // function(inner, arg1) { inner(arg1) }
+        if (t.isFunctionExpression(value)) {
+            let shouldSave = this.saveFunctionExpression(key, value);
+            on_function_expression(shouldSave)
+        } else if (t.isStringLiteral(value)) {
+            // tyrSs: "navigator.userAgent"
+            // save static strings for futher replacements in code
+            this.decryptionMap[key] = value.value;
+        } else {
+            console.error(`Unknown value type occured in operations map: ${value.type}`)
+            return true;
+        }
+        return false; // remove this entry from map
     }
 
-    public replaceMapIndexing() {
-        if (!this.mapName) return;
-        this.scope?.crawl(); // gather all references in this scope
-        const references = this.scope?.getBinding(this.mapName)?.referencePaths;
+    public replaceBinaryOpCallsAndIndexing() {
+        if (!this.scope || !this.mapName) return;
+        const references = this.findReferencesRecursively(this.scope, this.mapName);
         if (!references) {
             console.error("Map was found but has not been used further in the code")
             return;
         }
+        this.replaceBinaryOpCalls(references);
+        this.replaceMapIndexing(references);
+    }
+
+    /**
+     * const c = {
+              YwyJj: function (W, n) {
+                return W + n;
+              }
+            }
+        const b = c;
+        ...
+        return Math.abs(b.YwyJj(b.yWlpb(...)))
+     */
+    private replaceBinaryOpCalls(references: NodePath<t.Node>[]) {
+        const mapNames = this.extractMapNames(references)
+        for (const mapName of mapNames) {
+            this.replaceBinaryOpCallsForName(mapName);
+        }
+    }
+
+    private replaceMapIndexing(references: NodePath<t.Node>[]) {
         for (const reference of references) {
             const mapIndex = reference.parentPath;
             const mapIndexParent = mapIndex?.parentPath;
@@ -326,6 +319,106 @@ class MapReplacer {
                 }
             }
         }
+    }
+
+    /**
+        const c = {
+              YwyJj: function (W, n) {
+                return W + n;
+              }
+            }
+        const b = c;
+        const d = c
+        const a = d;
+     */
+    private findReferencesRecursively(scope: Scope, mapName: string): NodePath<t.Node>[] | undefined {
+        const totalRefereneces: NodePath<t.Node>[] = [];
+        scope?.crawl(); // gather all references in this scope
+        const references = scope?.getBinding(mapName)?.referencePaths;
+        if (!references) {
+            console.error("Map was found but has not been used further in the code")
+            return;
+        }
+        totalRefereneces.push(...references);
+
+        for (const reference of references) {
+            if (t.isIdentifier(reference.node)) {
+                const parentPath = reference.parentPath;
+                if (!parentPath) continue;
+                if (!t.isVariableDeclarator(parentPath.node)) continue;
+                if (!t.isIdentifier(parentPath.node.id)) continue;
+                
+                const mapName = parentPath.node.id.name;
+                const scope = parentPath.scope;
+                const subReferences = this.findReferencesRecursively(scope, mapName);
+                if (subReferences && subReferences.length > 0) {
+                    totalRefereneces.push(...subReferences);
+                }
+            }
+        }
+
+        return totalRefereneces;
+    }
+
+    /**
+        c, b, d, a
+     */
+    private extractMapNames(references: NodePath<t.Node>[]): string[] {
+        let mapReferencesNames = references.flatMap((ref) => {
+            return t.isIdentifier(ref.node) ? [ref.node.name] : [];
+        })
+        mapReferencesNames.sort();
+        return [...new Set(mapReferencesNames)];
+    }
+
+    /**
+       YwyJj: function (W, n) {
+                return W + n;
+              }
+        dOGlL: function (W, n) {
+                return W(n);
+              }
+     */
+    private saveFunctionExpression(key: string, value: t.FunctionExpression): boolean {
+        let funcBody = value.body.body;
+        if (funcBody.length !== 1) return true; // only one statement in function
+        if (!t.isReturnStatement(funcBody[0])) return true; // only return expression
+        const ret = funcBody[0].argument;
+
+        if (t.isBinaryExpression(ret)) {
+            this.decryptionMap[key] = ret.operator;
+            return true; // should save map variable name and its scope
+        } else if (t.isCallExpression(ret)) {
+            if (ret.arguments.length === 3) {
+                this.decryptionMap[key] = MapFuncType.CallThreeArg;
+            } else if (ret.arguments.length === 1) {
+                this.decryptionMap[key] = MapFuncType.CallOneArg;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * return Math.abs(c.YwyJj(c.yWlpb(...)))
+     */
+    private replaceBinaryOpCallsForName(mapName: string) {
+        this.scope?.traverse(this.scope.path.node, {
+            CallExpression(path: NodePath<t.CallExpression>) {
+                const node = path.node;
+                if (!t.isMemberExpression(node.callee)) return;
+
+                const {object, property} = node.callee;
+                if (!t.isIdentifier(object, {name: mapName})) return; // only if accessing functions in that map
+                if (!t.isStringLiteral(property)) return;
+
+                if (path.node.arguments.length !== 2) return; // only two arguments
+                // replace function call with respected binary operation
+                const op = this.decryptionMap[property.value];
+                if (!isBinaryOperator(op)) return;
+                let unObfNode = t.binaryExpression(op, node.arguments[0] as t.Expression, node.arguments[1] as t.Expression);
+                path.replaceWith(unObfNode);
+            }
+        }, this);
     }
 }
 
@@ -470,23 +563,55 @@ function deobfuscate(source: string) {
     DecryptStrings.decryptMapKeys(firstDecryptFuncBinding, decryptCtx);
     DecryptStrings.decryptMapKeys(secondDecryptFuncBinding, decryptCtx);
 
+    let foundMap = false;
     const mapReplacer = new MapReplacer();
 
     const processMap = {
         VariableDeclarator(path: NodePath<t.VariableDeclarator>) {
-            const scope = mapReplacer.parseMap(path);
-            if (!scope) return;
+            const found = mapReplacer.parseMap(path);
+            if (!found) return;
 
-            mapReplacer.replaceBinaryOpCalls();
-
-            mapReplacer.replaceMapIndexing();
+            mapReplacer.replaceBinaryOpCallsAndIndexing()
 
             path.stop();
             path.remove();
+            foundMap = true;
         }
     };
 
     traverse(ast, processMap);
+
+    if (!foundMap) {
+        const processMapAssigments = {
+            AssignmentExpression(path: NodePath<t.AssignmentExpression>) {
+                if (!t.isMemberExpression(path.node.left)) return;
+                
+                const { object, property, computed } = path.node.left;
+                if (!t.isStringLiteral(property) || !computed) return;
+                if (!t.isIdentifier(object)) return;
+                if (foundMap && mapReplacer.mapName !== object.name) return;
+
+                const unknown = mapReplacer.saveEntry(property.value, path.node.right, (flag: boolean) => {
+                    if (flag) {
+                        foundMap = true;
+                        mapReplacer.mapName = object.name;
+                        mapReplacer.scope = path.scope;
+                    }
+                });
+                if (!unknown) {
+                    path.remove();
+                }
+            }
+        }
+
+        traverse(ast, processMapAssigments);
+        mapReplacer.replaceBinaryOpCallsAndIndexing();
+    }
+
+    if (!foundMap) {
+        console.error("Decryption map was not found!");
+        return;
+    }
 
     const simplifyUnwrapOrElseExpr = {
         CallExpression(path: NodePath<t.CallExpression>) {
