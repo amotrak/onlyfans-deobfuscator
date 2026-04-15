@@ -549,7 +549,7 @@ function deobfuscate(source: string) {
         },
 
         CallExpression(path: NodePath<t.CallExpression>) {
-            if (!funcObfStrings) return;
+            if (!funcObfStrings || !baseDecryptFunc) return;
 
             if (ObfuscatedStrings.shuffleObfuscatedStrings(path, decryptCtx, funcObfStrings)) {
                 foundShuffleFunc = true;
